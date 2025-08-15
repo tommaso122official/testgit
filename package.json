@@ -1,5 +1,5 @@
 {
-  "name": "postback-telegram",
+  "name": "postback-telegram-discord",
   "version": "1.0.0",
   "main": "server.js",
   "type": "commonjs",
@@ -7,11 +7,10 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
     "body-parser": "^1.20.2",
+    "discord.js": "^14.15.3",
+    "express": "^4.19.2",
     "node-fetch": "^2.6.9"
   },
-  "engines": {
-    "node": ">=18"
-  }
+  "engines": { "node": ">=18" }
 }
