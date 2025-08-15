@@ -11,28 +11,17 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ===== Config da ENV =====
-// Telegram
 const TELEGRAM_API_TOKEN = process.env.TELEGRAM_API_TOKEN;
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
-
-// Discord
-const DISCORD_TOKEN    = process.env.DISCORD_TOKEN;
-const DISCORD_GUILD_ID = process.env.DISCORD_GUILD_ID;
-const DISCORD_ROLE_ID  = process.env.DISCORD_ROLE_ID;
-
-// Opzionali
-const TIMEWALL_OID = process.env.TIMEWALL_OID || "e81e5fbe6a8a28a1";
+const DISCORD_TOKEN      = process.env.DISCORD_TOKEN;
+const DISCORD_GUILD_ID   = process.env.DISCORD_GUILD_ID;
+const DISCORD_ROLE_ID    = process.env.DISCORD_ROLE_ID;
+const TIMEWALL_OID       = process.env.TIMEWALL_OID || "e81e5fbe6a8a28a1";
 
 // ===== Persistenza su file =====
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "db.txt");
+let db = { userBalances: {}, rewards: {} };
 
-// struttura in memoria
-let db = {
-  userBalances: {}, // { userId: number }
-  rewards: {}       // { [name]: { price:number, codes:string[] } }
-};
-
-// carica DB (se esiste)
 function loadDB() {
   try {
     if (fs.existsSync(DB_PATH)) {
@@ -42,33 +31,27 @@ function loadDB() {
       db.rewards = parsed.rewards || {};
       console.log(`📦 DB caricato: ${Object.keys(db.userBalances).length} utenti, ${Object.keys(db.rewards).length} rewards.`);
     } else {
-      console.log("📦 DB non trovato, ne verrà creato uno nuovo.");
-      saveDB(); // crea file
+      console.log("📦 DB non trovato, creo un nuovo file.");
+      saveDB();
     }
   } catch (e) {
     console.error("Errore lettura DB:", e);
   }
 }
-
-// salvataggio atomico
 function saveDB() {
   try {
-    const tmpPath = DB_PATH + ".tmp";
-    fs.writeFileSync(tmpPath, JSON.stringify(db, null, 2), "utf8");
-    fs.renameSync(tmpPath, DB_PATH);
+    const tmp = DB_PATH + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(db, null, 2), "utf8");
+    fs.renameSync(tmp, DB_PATH);
   } catch (e) {
     console.error("Errore salvataggio DB:", e);
   }
 }
-
-// salva con debounce (riduce I/O)
 let saveTimer = null;
 function queueSave() {
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(saveDB, 200);
 }
-
-// inizializza DB
 loadDB();
 
 // ===== Middleware =====
@@ -78,31 +61,20 @@ app.use(bodyParser.json());
 // ===== Utils =====
 function escapeMarkdown(text) {
   return String(text)
-    .replace(/_/g, "\\_")
-    .replace(/\*/g, "\\*")
-    .replace(/\[/g, "\\[")
-    .replace(/\]/g, "\\]")
-    .replace(/\(/g, "\\(")
-    .replace(/\)/g, "\\)")
-    .replace(/~/g, "\\~")
-    .replace(/\\/g, "\\\\")
-    .replace(/>/g, "\\>")
-    .replace(/#/g, "\\#")
-    .replace(/\+/g, "\\+")
-    .replace(/-/g, "\\-")
-    .replace(/=/g, "\\=")
-    .replace(/\|/g, "\\|")
-    .replace(/{/g, "\\{")
-    .replace(/}/g, "\\}")
-    .replace(/\./g, "\\.")
-    .replace(/!/g, "\\!");
+    .replace(/_/g, "\\_").replace(/\*/g, "\\*").replace(/\[/g, "\\[")
+    .replace(/\]/g, "\\]").replace(/\(/g, "\\(").replace(/\)/g, "\\)")
+    .replace(/~/g, "\\~").replace(/\\/g, "\\\\").replace(/>/g, "\\>")
+    .replace(/#/g, "\\#").replace(/\+/g, "\\+").replace(/-/g, "\\-")
+    .replace(/=/g, "\\=").replace(/\|/g, "\\|").replace(/{/g, "\\{")
+    .replace(/}/g, "\\}").replace(/\./g, "\\.").replace(/!/g, "\\!");
+}
+function hasRole(member, roleId) {
+  try { return !!member?.roles?.cache?.has(roleId); } catch { return false; }
 }
 
-// ===== /postback → Telegram (accetta GET e POST) =====
+// ===== /postback → Telegram (GET/POST) =====
 app.all("/postback", async (req, res) => {
   console.log("Metodo:", req.method, "Query:", req.query, "Body:", req.body);
-
-  // ✅ accetta sia querystring che body JSON/form
   const src = { ...req.query, ...req.body };
   const { userID, transactionID, revenue, currencyAmount, hash, ip, type } = src;
 
@@ -147,7 +119,7 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 
 // ===== Avvio server =====
 app.listen(PORT, () => {
-  console.log(`Server in esecuzione su porta ${PORT}`);
+  console.log(`Server in esecuzione su porta ${PORT} (PID: ${process.pid})`);
 });
 
 // ===== Discord Bot =====
@@ -155,152 +127,149 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,   // necessario per leggere i messaggi
+    GatewayIntentBits.MessageContent,
     GatewayIntentBits.DirectMessages
   ],
-  partials: [Partials.Channel], // per DM
+  partials: [Partials.Channel],
 });
 
 client.on("error", (e) => console.error("[Discord ERROR]", e));
 client.on("warn", (w) => console.warn("[Discord WARN]", w));
 
 client.once("ready", () => {
-  console.log(`🤖 Discord bot connesso come ${client.user.tag}`);
+  console.log(`🤖 Discord bot connesso come ${client.user.tag} (PID: ${process.pid})`);
 });
 
-function hasRole(member, roleId) {
-  try { return !!member?.roles?.cache?.has(roleId); } catch { return false; }
+// ---- Evita doppi listener ----
+if (!global.botMessageHandlerRegistered) {
+  client.on("messageCreate", async (message) => {
+    if (message.author.bot || !message.content.startsWith("!")) return;
+
+    const args = message.content.slice(1).trim().split(/ +/);
+    const command = args.shift()?.toLowerCase();
+    const senderId = message.author.id;
+
+    let member = null;
+    if (message.guild) member = message.member;
+
+    // HELP
+    if (command === "help") {
+      return message.reply(
+        "**Comandi disponibili:**\n" +
+        "`!help` — mostra questo messaggio\n" +
+        "`!balance` — mostra il tuo saldo\n" +
+        "`!rewards` — lista ricompense\n" +
+        "`!rewardclaim <nome> <qty>` — riscatta codici\n" +
+        "`!register` — link registrazione\n" +
+        (hasRole(member, DISCORD_ROLE_ID)
+          ? "\n**Admin:** `!addbalance @user <amm>`, `!removebalance @user`, `!createreward <nome> <prezzo>`, `!addreward <nome> <codice>`, `!deletereward <nome>`, `!balanceuser @user`"
+          : "")
+      );
+    }
+
+    // Admin
+    if (member && hasRole(member, DISCORD_ROLE_ID)) {
+      if (command === "addbalance") {
+        const target = message.mentions.users.first();
+        const amount = parseInt(args[1], 10);
+        if (!target || isNaN(amount)) return message.reply("Usa: `!addbalance @username <amount>`");
+        db.userBalances[target.id] = (db.userBalances[target.id] || 0) + amount;
+        queueSave();
+        return message.reply(`Aggiunto ${amount} coins a ${target.tag}. Bilancio: ${db.userBalances[target.id]} coins.`);
+      }
+
+      if (command === "removebalance") {
+        const target = message.mentions.users.first();
+        if (!target) return message.reply("Usa: `!removebalance @username`");
+        delete db.userBalances[target.id];
+        queueSave();
+        return message.reply(`Bilancio rimosso per ${target.tag}.`);
+      }
+
+      if (command === "createreward") {
+        const rewardName = args[0];
+        const price = parseInt(args[1], 10);
+        if (!rewardName || isNaN(price)) return message.reply("Usa: `!createreward <nome> <prezzo>`");
+        db.rewards[rewardName] = { price, codes: [] };
+        queueSave();
+        return message.reply(`Ricompensa "${rewardName}" creata a ${price} coins.`);
+      }
+
+      if (command === "addreward") {
+        const rewardName = args[0];
+        const code = args[1];
+        if (!db.rewards[rewardName]) return message.reply(`La ricompensa "${rewardName}" non esiste.`);
+        if (!code) return message.reply("Usa: `!addreward <nome> <codice>`");
+        db.rewards[rewardName].codes.push(code);
+        queueSave();
+        return message.reply(`Codice aggiunto. Stock "${rewardName}": ${db.rewards[rewardName].codes.length}.`);
+      }
+
+      if (command === "deletereward") {
+        const rewardName = args[0];
+        if (!db.rewards[rewardName]) return message.reply(`La ricompensa "${rewardName}" non esiste.`);
+        const remainingCodes = db.rewards[rewardName].codes.join(", ");
+        delete db.rewards[rewardName];
+        queueSave();
+        try { await message.author.send(`Codici rimanenti per "${rewardName}": ${remainingCodes || "(nessuno)"}`); } catch {}
+        return message.reply(`Ricompensa "${rewardName}" eliminata e codici inviati in privato.`);
+      }
+
+      if (command === "balanceuser") {
+        const target = message.mentions.users.first();
+        if (!target) return message.reply("Usa: `!balanceuser @username`");
+        const balance = db.userBalances[target.id] || 0;
+        return message.reply(`${target.tag} ha un bilancio di ${balance} coins.`);
+      }
+    }
+
+    // Pubblici
+    if (command === "balance") {
+      const balance = db.userBalances[senderId] || 0;
+      return message.reply(`Hai un bilancio di ${balance} coins.`);
+    }
+
+    if (command === "rewards") {
+      const rewardList = Object.entries(db.rewards)
+        .map(([name, data]) => `${name}: ${data.codes.length} disponibili a ${data.price} coins`)
+        .join("\n");
+      return message.reply(rewardList ? `Ricompense disponibili:\n${rewardList}` : "Nessuna ricompensa disponibile.");
+    }
+
+    if (command === "rewardclaim") {
+      const rewardName = args[0];
+      const quantity = parseInt(args[1], 10);
+      if (!db.rewards[rewardName]) return message.reply(`La ricompensa "${rewardName}" non esiste.`);
+      if (isNaN(quantity) || quantity <= 0) return message.reply("Usa: `!rewardclaim <nome> <quantità>`");
+      if (quantity > db.rewards[rewardName].codes.length) return message.reply(`Stock insufficiente per "${rewardName}".`);
+      const cost = db.rewards[rewardName].price * quantity;
+      const balance = db.userBalances[senderId] || 0;
+      if (balance < cost) return message.reply(`Servono ${cost} coins, ne hai ${balance}.`);
+
+      db.userBalances[senderId] = balance - cost;
+      const claimedCodes = db.rewards[rewardName].codes.splice(0, quantity);
+      queueSave();
+
+      try { await message.author.send(`Hai riscattato ${quantity} codici per "${rewardName}": ${claimedCodes.join(", ")}`); } catch {}
+      return message.reply(`Riscatto ok. Bilancio rimanente: ${db.userBalances[senderId]} coins.`);
+    }
+
+    if (command === "register") {
+      const link = `https://timewall.io/users/login?oid=${TIMEWALL_OID}&uid=${senderId}`;
+      try { await message.author.send(`Ecco il tuo link di registrazione: ${link}`); }
+      catch { return message.reply("Non riesco a scriverti in privato. Abilita i DM o scrivimi un messaggio."); }
+      return message.reply("Ti ho mandato il link in privato.");
+    }
+  });
+
+  global.botMessageHandlerRegistered = true;
 }
 
-client.on("messageCreate", async (message) => {
-  // Log leggero per debug (commenta se non serve)
-  // console.log("[DBG]", message.author.tag, message.content);
-
-  if (message.author.bot || !message.content.startsWith("!")) return;
-
-  const args = message.content.slice(1).trim().split(/ +/);
-  const command = args.shift()?.toLowerCase();
-  const senderId = message.author.id;
-
-  // member senza fetch (evita intent GuildMembers)
-  let member = null;
-  if (message.guild) member = message.member;
-
-  // ====== HELP ======
-  if (command === "help") {
-    return message.reply(
-      "**Comandi disponibili:**\n" +
-      "`!help` — mostra questo messaggio\n" +
-      "`!balance` — mostra il tuo saldo\n" +
-      "`!rewards` — lista ricompense\n" +
-      "`!rewardclaim <nome> <qty>` — riscatta codici\n" +
-      "`!register` — link registrazione\n" +
-      (hasRole(member, DISCORD_ROLE_ID)
-        ? "\n**Admin:** `!addbalance @user <amm>`, `!removebalance @user`, `!createreward <nome> <prezzo>`, `!addreward <nome> <codice>`, `!deletereward <nome>`, `!balanceuser @user`"
-        : "")
-    );
-  }
-
-  // ====== ADMIN ======
-  if (member && hasRole(member, DISCORD_ROLE_ID)) {
-    if (command === "addbalance") {
-      const target = message.mentions.users.first();
-      const amount = parseInt(args[1], 10);
-      if (!target || isNaN(amount)) return message.reply("Usa: `!addbalance @username <amount>`");
-      db.userBalances[target.id] = (db.userBalances[target.id] || 0) + amount;
-      queueSave();
-      return message.reply(`Aggiunto ${amount} coins a ${target.tag}. Bilancio: ${db.userBalances[target.id]} coins.`);
-    }
-
-    if (command === "removebalance") {
-      const target = message.mentions.users.first();
-      if (!target) return message.reply("Usa: `!removebalance @username`");
-      delete db.userBalances[target.id];
-      queueSave();
-      return message.reply(`Bilancio rimosso per ${target.tag}.`);
-    }
-
-    if (command === "createreward") {
-      const rewardName = args[0];
-      const price = parseInt(args[1], 10);
-      if (!rewardName || isNaN(price)) return message.reply("Usa: `!createreward <nome> <prezzo>`");
-      db.rewards[rewardName] = { price, codes: [] };
-      queueSave();
-      return message.reply(`Ricompensa "${rewardName}" creata a ${price} coins.`);
-    }
-
-    if (command === "addreward") {
-      const rewardName = args[0];
-      const code = args[1];
-      if (!db.rewards[rewardName]) return message.reply(`La ricompensa "${rewardName}" non esiste.`);
-      if (!code) return message.reply("Usa: `!addreward <nome> <codice>`");
-      db.rewards[rewardName].codes.push(code);
-      queueSave();
-      return message.reply(`Codice aggiunto. Stock "${rewardName}": ${db.rewards[rewardName].codes.length}.`);
-    }
-
-    if (command === "deletereward") {
-      const rewardName = args[0];
-      if (!db.rewards[rewardName]) return message.reply(`La ricompensa "${rewardName}" non esiste.`);
-      const remainingCodes = db.rewards[rewardName].codes.join(", ");
-      delete db.rewards[rewardName];
-      queueSave();
-      try { await message.author.send(`Codici rimanenti per "${rewardName}": ${remainingCodes || "(nessuno)"}`); } catch {}
-      return message.reply(`Ricompensa "${rewardName}" eliminata e codici inviati in privato.`);
-    }
-
-    if (command === "balanceuser") {
-      const target = message.mentions.users.first();
-      if (!target) return message.reply("Usa: `!balanceuser @username`");
-      const balance = db.userBalances[target.id] || 0;
-      return message.reply(`${target.tag} ha un bilancio di ${balance} coins.`);
-    }
-  }
-
-  // ====== PUBBLICI ======
-  if (command === "balance") {
-    const balance = db.userBalances[senderId] || 0;
-    return message.reply(`Hai un bilancio di ${balance} coins.`);
-  }
-
-  if (command === "rewards") {
-    const rewardList = Object.entries(db.rewards)
-      .map(([name, data]) => `${name}: ${data.codes.length} disponibili a ${data.price} coins`)
-      .join("\n");
-    return message.reply(rewardList ? `Ricompense disponibili:\n${rewardList}` : "Nessuna ricompensa disponibile.");
-  }
-
-  if (command === "rewardclaim") {
-    const rewardName = args[0];
-    const quantity = parseInt(args[1], 10);
-    if (!db.rewards[rewardName]) return message.reply(`La ricompensa "${rewardName}" non esiste.`);
-    if (isNaN(quantity) || quantity <= 0) return message.reply("Usa: `!rewardclaim <nome> <quantità>`");
-    if (quantity > db.rewards[rewardName].codes.length) return message.reply(`Stock insufficiente per "${rewardName}".`);
-    const cost = db.rewards[rewardName].price * quantity;
-    const balance = db.userBalances[senderId] || 0;
-    if (balance < cost) return message.reply(`Servono ${cost} coins, ne hai ${balance}.`);
-
-    db.userBalances[senderId] = balance - cost;
-    const claimedCodes = db.rewards[rewardName].codes.splice(0, quantity);
-    queueSave();
-
-    try {
-      await message.author.send(`Hai riscattato ${quantity} codici per "${rewardName}": ${claimedCodes.join(", ")}`);
-    } catch {}
-    return message.reply(`Riscatto ok. Bilancio rimanente: ${db.userBalances[senderId]} coins.`);
-  }
-
-  if (command === "register") {
-    const registrationLink = `https://timewall.io/users/login?oid=${TIMEWALL_OID}&uid=${senderId}`;
-    try { await message.author.send(`Ecco il tuo link di registrazione: ${registrationLink}`); }
-    catch { return message.reply("Non riesco a scriverti in privato. Abilita i DM o scrivimi un messaggio."); }
-    return message.reply("Ti ho mandato il link in privato.");
-  }
-});
-
-// Avvio bot (ATTENZIONE a non avere più servizi che usano lo stesso token!)
+// Avvia bot (metti DISCORD_ENABLE=true per controllare l’avvio opzionalmente)
 if (!DISCORD_TOKEN) {
   console.warn("⚠️  DISCORD_TOKEN non impostato: il bot Discord non verrà avviato.");
+} else if (process.env.DISCORD_ENABLE && process.env.DISCORD_ENABLE !== "true") {
+  console.warn("ℹ️  DISCORD_ENABLE != true: avvio Discord disabilitato per questa istanza.");
 } else {
   client.login(DISCORD_TOKEN).catch((e) => console.error("Errore login Discord:", e?.message || e));
 }
