@@ -4,7 +4,8 @@ const bodyParser = require("body-parser");
 const fetch = require("node-fetch"); // v2 per require
 const fs = require("fs");
 const path = require("path");
-const { Client, GatewayIntentBits, Partials } = require("discord.js");
+const { Client, GatewayIntentBits } = require("discord.js");
+const axios = require("axios"); // presente come nell'originale
 
 // ===== App Express =====
 const app = express();
@@ -13,14 +14,17 @@ const PORT = process.env.PORT || 3000;
 // ===== Config da ENV =====
 const TELEGRAM_API_TOKEN = process.env.TELEGRAM_API_TOKEN;
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
-const DISCORD_TOKEN      = process.env.DISCORD_TOKEN;
-const DISCORD_GUILD_ID   = process.env.DISCORD_GUILD_ID;
-const DISCORD_ROLE_ID    = process.env.DISCORD_ROLE_ID;
-const TIMEWALL_OID       = process.env.TIMEWALL_OID || "e81e5fbe6a8a28a1";
+
+const DISCORD_TOKEN  = process.env.DISCORD_TOKEN;
+const GUILD_ID       = process.env.DISCORD_GUILD_ID;  // usato per fetch member
+const ROLE_ID        = process.env.DISCORD_ROLE_ID;
+
+const TIMEWALL_OID   = process.env.TIMEWALL_OID || "e81e5fbe6a8a28a1";
 
 // ===== Persistenza su file =====
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "db.txt");
-let db = { userBalances: {}, rewards: {} };
+// struttura persistita: { userBalances, rewards, userLangs }
+let db = { userBalances: {}, rewards: {}, userLangs: {} };
 
 function loadDB() {
   try {
@@ -28,30 +32,24 @@ function loadDB() {
       const txt = fs.readFileSync(DB_PATH, "utf8");
       const parsed = JSON.parse(txt || "{}");
       db.userBalances = parsed.userBalances || {};
-      db.rewards = parsed.rewards || {};
-      console.log(`📦 DB caricato: ${Object.keys(db.userBalances).length} utenti, ${Object.keys(db.rewards).length} rewards.`);
+      db.rewards      = parsed.rewards      || {};
+      db.userLangs    = parsed.userLangs    || {};
+      console.log(`📦 DB caricato: ${Object.keys(db.userBalances).length} utenti, ${Object.keys(db.rewards).length} rewards, ${Object.keys(db.userLangs).length} lingue.`);
     } else {
       console.log("📦 DB non trovato, creo un nuovo file.");
       saveDB();
     }
-  } catch (e) {
-    console.error("Errore lettura DB:", e);
-  }
+  } catch (e) { console.error("Errore lettura DB:", e); }
 }
 function saveDB() {
   try {
     const tmp = DB_PATH + ".tmp";
     fs.writeFileSync(tmp, JSON.stringify(db, null, 2), "utf8");
     fs.renameSync(tmp, DB_PATH);
-  } catch (e) {
-    console.error("Errore salvataggio DB:", e);
-  }
+  } catch (e) { console.error("Errore salvataggio DB:", e); }
 }
 let saveTimer = null;
-function queueSave() {
-  if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(saveDB, 200);
-}
+function queueSave() { if (saveTimer) clearTimeout(saveTimer); saveTimer = setTimeout(saveDB, 200); }
 loadDB();
 
 // ===== Middleware =====
@@ -68,13 +66,120 @@ function escapeMarkdown(text) {
     .replace(/=/g, "\\=").replace(/\|/g, "\\|").replace(/{/g, "\\{")
     .replace(/}/g, "\\}").replace(/\./g, "\\.").replace(/!/g, "\\!");
 }
-function hasRole(member, roleId) {
-  try { return !!member?.roles?.cache?.has(roleId); } catch { return false; }
+function hasRole(member, roleId) { try { return member.roles.cache.has(roleId); } catch { return false; } }
+
+// ===== I18N (it/en) =====
+const i18n = {
+  it: {
+    help:
+`**Ecco l'elenco dei comandi disponibili:**
+
+**Comandi per tutti:**
+\`!help\` - Mostra questo messaggio di aiuto.
+\`!balance\` - Mostra il tuo bilancio.
+\`!rewards\` - Mostra la lista delle ricompense disponibili.
+\`!rewardclaim <nome> <quantità>\` - Riscatta una ricompensa se hai abbastanza coins.
+\`!register\` - Ricevi in privato il link univoco di registrazione su Timewall.
+\`!lang <it|en>\` - Imposta/Modifica la lingua del bot.
+$ADMIN$`,
+    adminHelp:
+`
+**Comandi riservati (richiedono ruolo specifico):**
+\`!addbalance @user <amount>\`
+\`!removebalance @user <amount>\`
+\`!createreward <name> <cost>\`
+\`!addreward <name> <code>\`
+\`!deletereward <name>\`
+\`!balanceuser @user\`
+`,
+    addbalanceUsage: "Usa il comando: `!addbalance @username <ammount>`",
+    removebalanceUsage: "Usa il comando: `!removebalance @username`",
+    createrewardUsage: "Usa il comando: `!createreward <nome> <prezzo>`",
+    addrewardMissing: (name)=>`La ricompensa "${name}" non esiste.`,
+    addrewardUsage: "Usa il comando: `!addreward <nome> <codice>`",
+    deleterewardMissing: (name)=>`La ricompensa "${name}" non esiste.`,
+    balanceuserUsage: "Usa il comando: `!balanceuser @username`",
+    balanceIs: (tag,b)=>`${tag} ha un bilancio di ${b} coins.`,
+    youBalance: (b)=>`Hai un bilancio di ${b} coins.`,
+    rewardsListHeader: "Ricompense disponibili:",
+    rewardsListEmpty: "Nessuna ricompensa disponibile.",
+    rewardMissing: (name)=>`La ricompensa "${name}" non esiste.`,
+    rewardQtyUsage: "Usa il comando: `!rewardclaim <nome> <quantità>`",
+    rewardNotEnough: (name)=>`Non ci sono abbastanza codici disponibili per "${name}".`,
+    notEnoughCoins: (need,have)=>`Non hai abbastanza coins. Ti servono ${need}, ma hai solo ${have}.`,
+    claimedDM: (q,name,codes)=>`Hai riscattato ${q} codici per "${name}": ${codes.join(", ")}`,
+    claimedPublic: (q,name,b)=>`Hai riscattato ${q} codici per "${name}". Bilancio rimanente: ${b} coins.`,
+    addedCoins: (amt,tag,b)=>`Aggiunto ${amt} coins a ${tag}. Bilancio attuale: ${b} coins.`,
+    removedBalance: (tag)=>`Bilancio rimosso per ${tag}.`,
+    rewardCreated: (name,price)=>`Ricompensa "${name}" creata con prezzo ${price} coins.`,
+    codeAdded: (name,count)=>`Codice aggiunto alla ricompensa "${name}". Stock attuale: ${count}.`,
+    rewardDeleted: (name)=>`Ricompensa "${name}" eliminata e codici inviati in privato.`,
+    remainingCodesDM: (name,remaining)=>`Codici rimanenti per "${name}": ${remaining}`,
+    registerDM: (url)=>`Ecco il tuo link di registrazione: ${url}`,
+    langSet: (lang)=>`Lingua impostata su ${lang === "it" ? "italiano" : "inglese"}.`,
+    langUsage: "Usa: `!lang it` oppure `!lang en`"
+  },
+  en: {
+    help:
+`**Here are the available commands:**
+
+**For everyone:**
+\`!help\` - Show this help message.
+\`!balance\` - Show your balance.
+\`!rewards\` - Show the list of available rewards.
+\`!rewardclaim <name> <qty>\` - Redeem a reward if you have enough coins.
+\`!register\` - Receive your unique Timewall registration link in DM.
+\`!lang <it|en>\` - Set/Change the bot language.
+$ADMIN$`,
+    adminHelp:
+`
+**Admin-only (role required):**
+\`!addbalance @user <amount>\`
+\`!removebalance @user <amount>\`
+\`!createreward <name> <cost>\`
+\`!addreward <name> <code>\`
+\`!deletereward <name>\`
+\`!balanceuser @user\`
+`,
+    addbalanceUsage: "Use: `!addbalance @username <ammount>`",
+    removebalanceUsage: "Use: `!removebalance @username`",
+    createrewardUsage: "Use: `!createreward <name> <price>`",
+    addrewardMissing: (name)=>`Reward "${name}" does not exist.`,
+    addrewardUsage: "Use: `!addreward <name> <code>`",
+    deleterewardMissing: (name)=>`Reward "${name}" does not exist.`,
+    balanceuserUsage: "Use: `!balanceuser @username`",
+    balanceIs: (tag,b)=>`${tag} has a balance of ${b} coins.`,
+    youBalance: (b)=>`You have a balance of ${b} coins.`,
+    rewardsListHeader: "Available rewards:",
+    rewardsListEmpty: "No rewards available.",
+    rewardMissing: (name)=>`Reward "${name}" does not exist.`,
+    rewardQtyUsage: "Use: `!rewardclaim <name> <quantity>`",
+    rewardNotEnough: (name)=>`Not enough codes available for "${name}".`,
+    notEnoughCoins: (need,have)=>`Not enough coins. You need ${need}, but you only have ${have}.`,
+    claimedDM: (q,name,codes)=>`You redeemed ${q} codes for "${name}": ${codes.join(", ")}`,
+    claimedPublic: (q,name,b)=>`You redeemed ${q} codes for "${name}". Remaining balance: ${b} coins.`,
+    addedCoins: (amt,tag,b)=>`Added ${amt} coins to ${tag}. Current balance: ${b} coins.`,
+    removedBalance: (tag)=>`Balance removed for ${tag}.`,
+    rewardCreated: (name,price)=>`Reward "${name}" created with price ${price} coins.`,
+    codeAdded: (name,count)=>`Code added to "${name}". Current stock: ${count}.`,
+    rewardDeleted: (name)=>`Reward "${name}" deleted and codes sent in DM.`,
+    remainingCodesDM: (name,remaining)=>`Remaining codes for "${name}": ${remaining}`,
+    registerDM: (url)=>`Here’s your registration link: ${url}`,
+    langSet: (lang)=>`Language set to ${lang === "it" ? "Italian" : "English"}.`,
+    langUsage: "Use: `!lang it` or `!lang en`"
+  }
+};
+function getLang(userId){ return db.userLangs[userId] || "it"; }
+function setLang(userId, lang){ db.userLangs[userId] = lang; queueSave(); }
+function T(userId, key, ...args){
+  const lang = getLang(userId);
+  const pack = i18n[lang];
+  const val = pack[key];
+  return typeof val === "function" ? val(...args) : val;
 }
 
 // ===== /postback → Telegram (GET/POST) =====
 app.all("/postback", async (req, res) => {
-  console.log("Metodo:", req.method, "Query:", req.query, "Body:", req.body);
   const src = { ...req.query, ...req.body };
   const { userID, transactionID, revenue, currencyAmount, hash, ip, type } = src;
 
@@ -122,154 +227,156 @@ app.listen(PORT, () => {
   console.log(`Server in esecuzione su porta ${PORT} (PID: ${process.pid})`);
 });
 
-// ===== Discord Bot =====
+// ===== Discord Bot (identico per logica/comandi) =====
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.DirectMessages
-  ],
-  partials: [Partials.Channel],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.DirectMessages],
 });
 
-client.on("error", (e) => console.error("[Discord ERROR]", e));
-client.on("warn", (w) => console.warn("[Discord WARN]", w));
+const userBalances = db.userBalances;
+const rewards      = db.rewards;
 
 client.once("ready", () => {
-  console.log(`🤖 Discord bot connesso come ${client.user.tag} (PID: ${process.pid})`);
+  console.log(`Bot connesso come ${client.user.tag}`);
 });
 
-// ---- Evita doppi listener ----
+// Anti-doppio listener
 if (!global.botMessageHandlerRegistered) {
   client.on("messageCreate", async (message) => {
     if (message.author.bot || !message.content.startsWith("!")) return;
 
     const args = message.content.slice(1).trim().split(/ +/);
-    const command = args.shift()?.toLowerCase();
+    const command = args.shift().toLowerCase();
     const senderId = message.author.id;
 
+    // fetch member come nel tuo originale
     let member = null;
-    if (message.guild) member = message.member;
+    try {
+      if (message.guild) {
+        member = await message.guild.members.fetch(senderId);
+      } else if (GUILD_ID) {
+        const g = await client.guilds.fetch(GUILD_ID);
+        member = await g.members.fetch(senderId);
+      }
+    } catch (_) {}
 
-    // HELP
-    if (command === "help") {
-      return message.reply(
-        "**Comandi disponibili:**\n" +
-        "`!help` — mostra questo messaggio\n" +
-        "`!balance` — mostra il tuo saldo\n" +
-        "`!rewards` — lista ricompense\n" +
-        "`!rewardclaim <nome> <qty>` — riscatta codici\n" +
-        "`!register` — link registrazione\n" +
-        (hasRole(member, DISCORD_ROLE_ID)
-          ? "\n**Admin:** `!addbalance @user <amm>`, `!removebalance @user`, `!createreward <nome> <prezzo>`, `!addreward <nome> <codice>`, `!deletereward <nome>`, `!balanceuser @user`"
-          : "")
-      );
+    // comando lingua per-utente
+    if (command === "lang") {
+      const lang = (args[0] || "").toLowerCase();
+      if (lang !== "it" && lang !== "en") return message.reply(T(senderId, "langUsage"));
+      setLang(senderId, lang);
+      return message.reply(T(senderId, "langSet", lang));
     }
 
-    // Admin
-    if (member && hasRole(member, DISCORD_ROLE_ID)) {
+    // ===== Admin (ruolo richiesto) =====
+    if (member && hasRole(member, ROLE_ID)) {
       if (command === "addbalance") {
         const target = message.mentions.users.first();
-        const amount = parseInt(args[1], 10);
-        if (!target || isNaN(amount)) return message.reply("Usa: `!addbalance @username <amount>`");
-        db.userBalances[target.id] = (db.userBalances[target.id] || 0) + amount;
+        const amount = parseInt(args[1]);
+        if (!target || isNaN(amount)) return message.reply(T(senderId, "addbalanceUsage"));
+        userBalances[target.id] = (userBalances[target.id] || 0) + amount;
         queueSave();
-        return message.reply(`Aggiunto ${amount} coins a ${target.tag}. Bilancio: ${db.userBalances[target.id]} coins.`);
+        return message.reply(T(senderId, "addedCoins", amount, target.tag, userBalances[target.id]));
       }
 
       if (command === "removebalance") {
         const target = message.mentions.users.first();
-        if (!target) return message.reply("Usa: `!removebalance @username`");
-        delete db.userBalances[target.id];
+        if (!target) return message.reply(T(senderId, "removebalanceUsage"));
+        delete userBalances[target.id];
         queueSave();
-        return message.reply(`Bilancio rimosso per ${target.tag}.`);
+        return message.reply(T(senderId, "removedBalance", target.tag));
       }
 
       if (command === "createreward") {
         const rewardName = args[0];
-        const price = parseInt(args[1], 10);
-        if (!rewardName || isNaN(price)) return message.reply("Usa: `!createreward <nome> <prezzo>`");
-        db.rewards[rewardName] = { price, codes: [] };
+        const price = parseInt(args[1]);
+        if (!rewardName || isNaN(price)) return message.reply(T(senderId, "createrewardUsage"));
+        rewards[rewardName] = { price, codes: [] };
         queueSave();
-        return message.reply(`Ricompensa "${rewardName}" creata a ${price} coins.`);
+        return message.reply(T(senderId, "rewardCreated", rewardName, price));
       }
 
       if (command === "addreward") {
         const rewardName = args[0];
         const code = args[1];
-        if (!db.rewards[rewardName]) return message.reply(`La ricompensa "${rewardName}" non esiste.`);
-        if (!code) return message.reply("Usa: `!addreward <nome> <codice>`");
-        db.rewards[rewardName].codes.push(code);
+        if (!rewards[rewardName]) return message.reply(T(senderId, "addrewardMissing", rewardName));
+        if (!code) return message.reply(T(senderId, "addrewardUsage"));
+        rewards[rewardName].codes.push(code);
         queueSave();
-        return message.reply(`Codice aggiunto. Stock "${rewardName}": ${db.rewards[rewardName].codes.length}.`);
+        return message.reply(T(senderId, "codeAdded", rewardName, rewards[rewardName].codes.length));
       }
 
       if (command === "deletereward") {
         const rewardName = args[0];
-        if (!db.rewards[rewardName]) return message.reply(`La ricompensa "${rewardName}" non esiste.`);
-        const remainingCodes = db.rewards[rewardName].codes.join(", ");
-        delete db.rewards[rewardName];
+        if (!rewards[rewardName]) return message.reply(T(senderId, "deleterewardMissing", rewardName));
+        const remainingCodes = rewards[rewardName].codes.join(", ");
+        delete rewards[rewardName];
         queueSave();
-        try { await message.author.send(`Codici rimanenti per "${rewardName}": ${remainingCodes || "(nessuno)"}`); } catch {}
-        return message.reply(`Ricompensa "${rewardName}" eliminata e codici inviati in privato.`);
+        try { await message.author.send(T(senderId, "remainingCodesDM", rewardName, remainingCodes)); } catch {}
+        return message.reply(T(senderId, "rewardDeleted", rewardName));
       }
 
       if (command === "balanceuser") {
         const target = message.mentions.users.first();
-        if (!target) return message.reply("Usa: `!balanceuser @username`");
-        const balance = db.userBalances[target.id] || 0;
-        return message.reply(`${target.tag} ha un bilancio di ${balance} coins.`);
+        if (!target) return message.reply(T(senderId, "balanceuserUsage"));
+        const balance = userBalances[target.id] || 0;
+        return message.reply(T(senderId, "balanceIs", target.tag, balance));
       }
     }
 
-    // Pubblici
+    // ===== Comandi per tutti =====
     if (command === "balance") {
-      const balance = db.userBalances[senderId] || 0;
-      return message.reply(`Hai un bilancio di ${balance} coins.`);
+      const balance = userBalances[senderId] || 0;
+      return message.reply(T(senderId, "youBalance", balance));
     }
 
     if (command === "rewards") {
-      const rewardList = Object.entries(db.rewards)
-        .map(([name, data]) => `${name}: ${data.codes.length} disponibili a ${data.price} coins`)
+      const entries = Object.entries(rewards);
+      if (entries.length === 0) return message.reply(T(senderId, "rewardsListEmpty"));
+      const rewardList = entries
+        .map(([name, data]) =>
+          `${name}: ${data.codes.length} ${getLang(senderId)==="it"?"disponibili a":"available at"} ${data.price} coins`
+        )
         .join("\n");
-      return message.reply(rewardList ? `Ricompense disponibili:\n${rewardList}` : "Nessuna ricompensa disponibile.");
+      return message.reply(`${T(senderId, "rewardsListHeader")}\n${rewardList}`);
     }
 
     if (command === "rewardclaim") {
       const rewardName = args[0];
-      const quantity = parseInt(args[1], 10);
-      if (!db.rewards[rewardName]) return message.reply(`La ricompensa "${rewardName}" non esiste.`);
-      if (isNaN(quantity) || quantity <= 0) return message.reply("Usa: `!rewardclaim <nome> <quantità>`");
-      if (quantity > db.rewards[rewardName].codes.length) return message.reply(`Stock insufficiente per "${rewardName}".`);
-      const cost = db.rewards[rewardName].price * quantity;
-      const balance = db.userBalances[senderId] || 0;
-      if (balance < cost) return message.reply(`Servono ${cost} coins, ne hai ${balance}.`);
+      const quantity = parseInt(args[1]);
+      if (!rewards[rewardName]) return message.reply(T(senderId, "rewardMissing", rewardName));
+      if (isNaN(quantity) || quantity <= 0) return message.reply(T(senderId, "rewardQtyUsage"));
+      if (quantity > rewards[rewardName].codes.length) return message.reply(T(senderId, "rewardNotEnough", rewardName));
 
-      db.userBalances[senderId] = balance - cost;
-      const claimedCodes = db.rewards[rewardName].codes.splice(0, quantity);
+      const cost = rewards[rewardName].price * quantity;
+      const balance = userBalances[senderId] || 0;
+      if (balance < cost) return message.reply(T(senderId, "notEnoughCoins", cost, balance));
+
+      userBalances[senderId] = balance - cost;
+      const claimedCodes = rewards[rewardName].codes.splice(0, quantity);
       queueSave();
 
-      try { await message.author.send(`Hai riscattato ${quantity} codici per "${rewardName}": ${claimedCodes.join(", ")}`); } catch {}
-      return message.reply(`Riscatto ok. Bilancio rimanente: ${db.userBalances[senderId]} coins.`);
+      try { await message.author.send(T(senderId, "claimedDM", quantity, rewardName, claimedCodes)); } catch {}
+      return message.reply(T(senderId, "claimedPublic", quantity, rewardName, userBalances[senderId]));
     }
 
     if (command === "register") {
-      const link = `https://timewall.io/users/login?oid=${TIMEWALL_OID}&uid=${senderId}`;
-      try { await message.author.send(`Ecco il tuo link di registrazione: ${link}`); }
-      catch { return message.reply("Non riesco a scriverti in privato. Abilita i DM o scrivimi un messaggio."); }
-      return message.reply("Ti ho mandato il link in privato.");
+      const registrationLink = `https://timewall.io/users/login?oid=${TIMEWALL_OID}&uid=${senderId}`;
+      return message.author.send(T(senderId, "registerDM", registrationLink));
+    }
+
+    if (command === "help") {
+      const isAdmin = !!(member && hasRole(member, ROLE_ID));
+      const text = T(senderId, "help").replace("$ADMIN$", isAdmin ? T(senderId, "adminHelp") : "");
+      return message.reply(text);
     }
   });
 
   global.botMessageHandlerRegistered = true;
 }
 
-// Avvia bot (metti DISCORD_ENABLE=true per controllare l’avvio opzionalmente)
+// Login del bot
 if (!DISCORD_TOKEN) {
   console.warn("⚠️  DISCORD_TOKEN non impostato: il bot Discord non verrà avviato.");
-} else if (process.env.DISCORD_ENABLE && process.env.DISCORD_ENABLE !== "true") {
-  console.warn("ℹ️  DISCORD_ENABLE != true: avvio Discord disabilitato per questa istanza.");
 } else {
   client.login(DISCORD_TOKEN).catch((e) => console.error("Errore login Discord:", e?.message || e));
 }
