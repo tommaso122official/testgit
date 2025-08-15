@@ -1,16 +1,20 @@
 {
-  "name": "postback-telegram-discord",
+  "name": "superrewardsbot",
   "version": "1.0.0",
+  "description": "Bot Discord SuperRewards identico all'originale",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
     "start": "node server.js"
   },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
-    "body-parser": "^1.20.2",
+    "axios": "^1.7.7",
+    "body-parser": "^1.20.3",
     "discord.js": "^14.15.3",
     "express": "^4.19.2",
-    "node-fetch": "^2.6.9"
-  },
-  "engines": { "node": ">=18" }
+    "node-fetch": "^2.7.0"
+  }
 }
