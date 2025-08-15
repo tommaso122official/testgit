@@ -1,7 +1,7 @@
 // ===== Imports =====
 const express = require("express");
 const bodyParser = require("body-parser");
-const fetch = require("node-fetch");           // usa v2 con require
+const fetch = require("node-fetch"); // usa v2 con require
 const { Client, GatewayIntentBits, Partials } = require("discord.js");
 
 // ===== App Express =====
@@ -14,7 +14,7 @@ const TELEGRAM_API_TOKEN = process.env.TELEGRAM_API_TOKEN;
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 
 // Discord
-const DISCORD_TOKEN   = process.env.DISCORD_TOKEN;
+const DISCORD_TOKEN    = process.env.DISCORD_TOKEN;
 const DISCORD_GUILD_ID = process.env.DISCORD_GUILD_ID;
 const DISCORD_ROLE_ID  = process.env.DISCORD_ROLE_ID;
 
@@ -52,9 +52,12 @@ function escapeMarkdown(text) {
 app.all("/postback", async (req, res) => {
   const method = req.method;
   console.log("Metodo ricevuto:", method);
-  console.log("Parametri ricevuti:", req.query);
+  console.log("Query:", req.query);
+  console.log("Body:", req.body);
 
-  const { userID, transactionID, revenue, currencyAmount, hash, ip, type } = req.query;
+  // ✅ Accetta sia querystring che body (JSON o form)
+  const src = { ...req.query, ...req.body };
+  const { userID, transactionID, revenue, currencyAmount, hash, ip, type } = src;
 
   if (!userID || !transactionID || !currencyAmount) {
     return res.status(400).json({
@@ -153,12 +156,10 @@ client.on("messageCreate", async (message) => {
   const command = args.shift()?.toLowerCase();
   const senderId = message.author.id;
 
-  // Se siamo in una guild, recupero il member (per ruoli)
+  // ✅ Usa il member già presente (niente fetch → niente intent GuildMembers)
   let member = null;
   if (message.guild) {
-    try {
-      member = await message.guild.members.fetch(senderId);
-    } catch (_) {}
+    member = message.member;
   }
 
   // ====== Comandi Admin (richiedono ruolo) ======
