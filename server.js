@@ -5,9 +5,9 @@ const fetch = require("node-fetch");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Configurazione Telegram
-const TELEGRAM_API_TOKEN = "7281815713:AAFl5eaCu5VN2RH4VPuh4bcCCzOap4MKyPk";
-const CHAT_ID = "1105444796"; // Il tuo chat_id
+// Configurazione Telegram (DA ENV)
+const TELEGRAM_API_TOKEN = process.env.TELEGRAM_API_TOKEN;
+const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
 // Middleware per il parsing di URL e JSON
 app.use(bodyParser.urlencoded({ extended: true }));
@@ -51,6 +51,14 @@ app.all("/postback", async (req, res) => {
   if (!userID || !transactionID || !currencyAmount) {
     res.status(400).json({
       error: "Parametri obbligatori mancanti: userID, transactionID o currencyAmount."
+    });
+    return;
+  }
+
+  // Controllo configurazione Telegram
+  if (!TELEGRAM_API_TOKEN || !CHAT_ID) {
+    res.status(500).json({
+      error: "Configurazione Telegram mancante: impostare TELEGRAM_API_TOKEN e TELEGRAM_CHAT_ID nelle variabili d'ambiente."
     });
     return;
   }
